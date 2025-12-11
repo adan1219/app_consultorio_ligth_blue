@@ -1,2 +1,2 @@
 # app_consultorio_ligth_blue
-aplicacion local para consultorio denta;
+aplicacion local para consultorio dental
