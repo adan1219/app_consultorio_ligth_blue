@@ -24,7 +24,7 @@ import hashlib
 
 # Import backend
 try:
-    from consultorio_items import AppConfig, Repo, RegistroService, ReporteService, CorteService, KPIService, _parse_date
+    from consultorio_items import AppConfig, Repo, RegistroService, ReporteService, CorteService, KPIService, ComisionService, _parse_date
 except Exception as e:
     raise SystemExit("No puedo importar consultorio_items.py: " + str(e))
 
@@ -42,6 +42,7 @@ class ConsultorioGUI(tk.Tk):
         self.config_path = tk.StringVar(value=str(DEFAULT_CONFIG_PATH))
         self.cfg = None
         self.repo = None
+        self._comision_service = None
 
         self._build_menu()
 
@@ -1646,6 +1647,9 @@ class ConsultorioGUI(tk.Tk):
                 messagebox.showwarning("Excel","Crea plantilla primero en Config.")
                 return False
             self.repo = Repo(self.cfg)
+            self._comision_service = ComisionService(self.repo, self.cfg)
+        elif not self._comision_service:
+            self._comision_service = ComisionService(self.repo, self.cfg)
         return True
 
     # -------------------------
@@ -2724,6 +2728,7 @@ class ConsultorioGUI(tk.Tk):
 
         self.tree_com_hist.pack(fill="both", padx=5, pady=5, expand=True)
         self._cargar_personal_comisiones()
+        self._cargar_historial_abonos()
 
     def _cargar_personal_comisiones(self):
         if not self._ensure_repo():
@@ -2736,6 +2741,9 @@ class ConsultorioGUI(tk.Tk):
 
         self.cmb_doc_comisiones["values"] = nombres
         self.cmb_abonos_personal["values"] = nombres
+        if nombres:
+            self.cmb_doc_comisiones.set(nombres[0])
+            self.cmb_abonos_personal.set(nombres[0])
 
     # ============================================================
     #  VENTANA EMERGENTE PARA CONFIRMAR ABONO
@@ -2806,21 +2814,154 @@ class ConsultorioGUI(tk.Tk):
         2. Llama al backend (cuando esté listo)
         3. Rellena árbol y totales
         """
-        print("→ TODO: Llamar al backend para cargar comisiones del día")
+        if not self._ensure_repo():
+            return
+
+        doctor = self.cmb_doc_comisiones.get().strip()
+        fecha_sel = self.date_fecha_comisiones.get_date() if hasattr(self.date_fecha_comisiones, "get_date") else None
+
+        if not doctor:
+            messagebox.showwarning("Comisiones", "Selecciona un doctor.")
+            return
+        if not fecha_sel:
+            messagebox.showwarning("Comisiones", "Selecciona una fecha.")
+            return
+
+        self.tree_com_resumen.delete(*self.tree_com_resumen.get_children())
+
+        try:
+            df, tot = self._comision_service.resumen_dia_por_doctor(fecha_sel, doctor)
+        except Exception as e:
+            messagebox.showerror("Comisiones", f"Error cargando comisiones:\n{e}")
+            return
+
+        for _, r in df.iterrows():
+            vals = (
+                r.get("hora", ""),
+                r.get("paciente", ""),
+                f"{float(r.get('total', 0.0)):.2f}",
+                r.get("metodo", ""),
+                r.get("moneda", ""),
+                f"{float(r.get('comision', 0.0)):.2f}",
+                f"{float(r.get('pagado', 0.0)):.2f}",
+                f"{float(r.get('pendiente', 0.0)):.2f}",
+            )
+            self.tree_com_resumen.insert("", "end", values=vals)
+
+        self.lbl_com_gen.config(text=f"{float(tot.get('total_generado', 0.0)):.2f}")
+        self.lbl_com_pag.config(text=f"{float(tot.get('pagado', 0.0)):.2f}")
+        self.lbl_com_pen.config(text=f"{float(tot.get('pendiente', 0.0)):.2f}")
+        self._cargar_historial_abonos()
 
 
     def _cargar_pendientes_personal(self):
         """
         Carga el listado de comisiones pendientes del personal seleccionado.
         """
-        print("→ TODO: Llamar backend: pendientes para", self.cmb_abonos_personal.get())
+        if not self._ensure_repo():
+            return
+
+        nombre = self.cmb_abonos_personal.get().strip()
+        if not nombre:
+            messagebox.showwarning("Comisiones", "Selecciona personal.")
+            return
+
+        personal = self.repo.dfs.get("Personal", pd.DataFrame()).copy()
+        personal["nombre_norm"] = personal.get("nombre", "").fillna("").apply(lambda s: str(s).strip().lower())
+        match = personal[personal["nombre_norm"] == nombre.strip().lower()]
+        if match.empty:
+            match = personal[personal.get("nombre", "").fillna("").str.contains(nombre, case=False, na=False)]
+        if match.empty:
+            messagebox.showwarning("Comisiones", "No encontré al personal seleccionado.")
+            return
+
+        id_personal = str(match.iloc[0].get("id_personal", ""))
+        self.tree_com_pendientes.delete(*self.tree_com_pendientes.get_children())
+
+        try:
+            df = self._comision_service.pendientes_por_personal(id_personal)
+        except Exception as e:
+            messagebox.showerror("Comisiones", f"Error cargando pendientes:\n{e}")
+            return
+
+        for _, r in df.iterrows():
+            vals = (
+                r.get("fecha", ""),
+                r.get("paciente", ""),
+                f"{float(r.get('total', 0.0)):.2f}",
+                f"{float(r.get('comision', 0.0)):.2f}",
+                f"{float(r.get('abonado', 0.0)):.2f}",
+                f"{float(r.get('restante', 0.0)):.2f}",
+                r.get("metodo", ""),
+            )
+            self.tree_com_pendientes.insert("", "end", values=vals)
+        self._cargar_historial_abonos()
 
 
     def _registrar_abono(self, personal, fecha, paciente, monto, nota):
         """
         Registra un abono en backend.
         """
-        print("→ TODO: Guardar abono:", personal, fecha, paciente, monto, nota)
+        if not self._ensure_repo():
+            return
+
+        try:
+            monto_val = float(monto)
+        except Exception:
+            messagebox.showwarning("Abono", "El monto debe ser numérico.")
+            return
+
+        try:
+            fecha_dt = _parse_date(str(fecha)).date() if hasattr(_parse_date, "__call__") else fecha
+        except Exception:
+            fecha_dt = None
+
+        try:
+            aid = self._comision_service.registrar_abono_por_nombre(
+                personal_nombre=personal,
+                fecha_consulta=fecha_dt or date.today(),
+                paciente_nombre=paciente,
+                monto=monto_val,
+                nota=nota or ""
+            )
+        except Exception as e:
+            messagebox.showerror("Abono", f"No pude registrar abono:\n{e}")
+            return
+
+        if aid:
+            messagebox.showinfo("Abono", f"Abono registrado (ID {aid}).")
+            self._cargar_pendientes_personal()
+            self._cargar_comisiones_dia()
+            self._cargar_historial_abonos()
+        else:
+            messagebox.showwarning("Abono", "No se encontró la consulta para registrar el abono.")
+
+    def _cargar_historial_abonos(self):
+        if not self._ensure_repo():
+            return
+
+        if not self._comision_service:
+            return
+
+        self.tree_com_hist.delete(*self.tree_com_hist.get_children())
+
+        try:
+            df = self._comision_service.historial_abonos()
+        except Exception as e:
+            messagebox.showerror("Comisiones", f"Error cargando historial:\n{e}")
+            return
+
+        for _, r in df.iterrows():
+            vals = (
+                r.get("fecha_pago", ""),
+                r.get("personal", ""),
+                r.get("paciente", ""),
+                r.get("consulta", ""),
+                f"{float(r.get('monto', 0.0)):.2f}",
+                r.get("moneda", ""),
+                r.get("nota", ""),
+            )
+            self.tree_com_hist.insert("", "end", values=vals)
 
  
 
