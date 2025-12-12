@@ -422,7 +422,7 @@ class ConsultorioGUI(tk.Tk):
         df = self.repo.dfs.get("Personal", pd.DataFrame())
 
         # Mostrar solo activos
-        df = df[df["activo"] == 1]
+        df = self._filtrar_personal_activo(df)
 
         rows = []
         for _, r in df.iterrows():
@@ -2730,12 +2730,28 @@ class ConsultorioGUI(tk.Tk):
         self._cargar_personal_comisiones()
         self._cargar_historial_abonos()
 
+    def _filtrar_personal_activo(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Devuelve únicamente filas marcadas como activas en la columna 'activo'."""
+        if "activo" not in df.columns:
+            return df
+
+        def _is_active(val):
+            try:
+                return float(val) == 1.0
+            except (TypeError, ValueError):
+                pass
+            s = str(val).strip().lower()
+            return s in {"1", "true", "si", "sí", "activo", "yes", "y"}
+
+        mask = df["activo"].apply(_is_active)
+        return df[mask]
+
     def _cargar_personal_comisiones(self):
         if not self._ensure_repo():
             return
 
         df = self.repo.dfs["Personal"]
-        df = df[df["activo"] == 1]
+        df = self._filtrar_personal_activo(df)
 
         nombres = df["nombre"].tolist()
 
