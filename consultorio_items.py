@@ -1595,6 +1595,7 @@ class ComisionService:
             return None
         personal["nombre_norm"] = personal.get("nombre","").fillna("").apply(normalize_name)
         target_norm = normalize_name(personal_nombre)
+        print("[DEBUG] registrar_abono_por_nombre -> personal_target_norm:", target_norm)
         match = personal[personal["nombre_norm"] == target_norm]
         if match.empty:
             match = personal[personal.get("nombre","").fillna("").str.contains(personal_nombre, case=False, na=False)]
@@ -1615,12 +1616,19 @@ class ComisionService:
         pac["nombre_norm"] = pac.get("nombre","").fillna("").apply(normalize_name)
 
         cons = cons.merge(pac[["id_paciente","nombre_norm"]], on="id_paciente", how="left")
+        print("[DEBUG] Consultas tras merge pac:", cons[["id_consulta","fecha_dia","nombre_norm","id_doctor","id_promotor"]].head(10))
+
+        paciente_norm = normalize_name(paciente_nombre)
+        print("[DEBUG] Buscando por fecha/paciente -> fecha_consulta:", fecha_consulta, "paciente_norm:", paciente_norm,
+              "filas totales:", len(cons))
         cons = cons[cons["fecha_dia"] == fecha_consulta]
-        cons = cons[cons["nombre_norm"] == normalize_name(paciente_nombre)]
+        cons = cons[cons["nombre_norm"] == paciente_norm]
+        print("[DEBUG] Filtro por fecha/paciente -> filas:", len(cons))
         cons["id_doctor"] = cons.get("id_doctor","").astype(str)
         cons["id_promotor"] = cons.get("id_promotor","").astype(str)
 
         cons = cons[(cons["id_doctor"] == id_personal) | (cons["id_promotor"] == id_personal)]
+        print("[DEBUG] Filtro por personal -> filas:", len(cons), "id_personal:", id_personal)
         if cons.empty:
             return None
 
