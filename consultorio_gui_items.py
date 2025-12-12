@@ -9,6 +9,7 @@ Requiere: consultorio_items.py en la misma carpeta.
 from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import sys
 from pathlib import Path
 from datetime import date
 from datetime import datetime
@@ -21,6 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import pandas as pd
 import hashlib
+from licencia_local import evaluar_licencia
 
 # Import backend
 try:
@@ -32,10 +34,16 @@ APP_TITLE = "APP CONSULTORIO – GUI (Items)"
 DEFAULT_CONFIG_PATH = Path("./config.json").resolve()
 
 class ConsultorioGUI(tk.Tk):
-    def __init__(self):
+    def __init__(self, dias_licencia_restantes: int | None = None):
         super().__init__()
 
-        self.title(APP_TITLE)
+        self.dias_licencia_restantes = dias_licencia_restantes
+
+        titulo = APP_TITLE
+        if self.dias_licencia_restantes is not None:
+            titulo = f"{APP_TITLE} (Prueba – {self.dias_licencia_restantes} días restantes)"
+
+        self.title(titulo)
         self.geometry("1200x780")
         self.minsize(1000,700)
 
@@ -2987,4 +2995,20 @@ class ConsultorioGUI(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = ConsultorioGUI(); app.mainloop()
+    info_licencia = evaluar_licencia()
+
+    estado = info_licencia.get("estado") if isinstance(info_licencia, dict) else None
+
+    if estado == "PRUEBA_VENCIDA":
+        messagebox.showerror(
+            "Licencia",
+            "El periodo de prueba ha finalizado. Por favor, contacta al proveedor para activar la licencia.",
+        )
+        sys.exit()
+
+    if estado == "PRUEBA_ACTIVA":
+        app = ConsultorioGUI(dias_licencia_restantes=info_licencia.get("dias_restantes"))
+    else:
+        app = ConsultorioGUI()
+
+    app.mainloop()
