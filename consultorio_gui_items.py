@@ -457,6 +457,10 @@ class ConsultorioGUI(tk.Tk):
             if cfg.excel_path.exists():
                 self.repo = Repo(cfg)
                 status = "OK – Excel cargado"
+                # Al cargar la configuración, refrescar el personal para que aparezca
+                # inmediatamente en los combos de Comisiones y en la tabla de Config.
+                self._cargar_personal_comisiones()
+                self._load_personal_table()
             else:
                 self.repo = None
                 status = "Excel NO encontrado. Crea plantilla"
