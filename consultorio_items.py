@@ -1617,8 +1617,12 @@ class ComisionService:
 
         cons = cons.merge(pac[["id_paciente","nombre_norm"]], on="id_paciente", how="left")
         print("[DEBUG] Consultas tras merge pac:", cons[["id_consulta","fecha_dia","nombre_norm","id_doctor","id_promotor"]].head(10))
+
+        paciente_norm = normalize_name(paciente_nombre)
+        print("[DEBUG] Buscando por fecha/paciente -> fecha_consulta:", fecha_consulta, "paciente_norm:", paciente_norm,
+              "filas totales:", len(cons))
         cons = cons[cons["fecha_dia"] == fecha_consulta]
-        cons = cons[cons["nombre_norm"] == normalize_name(paciente_nombre)]
+        cons = cons[cons["nombre_norm"] == paciente_norm]
         print("[DEBUG] Filtro por fecha/paciente -> filas:", len(cons))
         cons["id_doctor"] = cons.get("id_doctor","").astype(str)
         cons["id_promotor"] = cons.get("id_promotor","").astype(str)

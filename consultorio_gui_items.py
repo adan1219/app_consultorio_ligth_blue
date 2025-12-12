@@ -2942,12 +2942,17 @@ class ConsultorioGUI(tk.Tk):
 
         try:
             fecha_dt = _parse_date(str(fecha)).date() if hasattr(_parse_date, "__call__") else fecha
-        except Exception:
+        except Exception as e:
+            print("[DEBUG] No pude parsear fecha del TreeView:", fecha, "->", e)
             fecha_dt = None
 
         try:
-            print("[DEBUG] Registrar abono -> personal:", personal, "fecha:", fecha_dt or date.today(),
-                  "paciente:", paciente, "monto:", monto_val, "nota:", nota)
+            print("[DEBUG] Registrar abono -> personal:", personal,
+                  "fecha_raw:", fecha,
+                  "fecha_parseada:", fecha_dt or date.today(),
+                  "paciente:", paciente,
+                  "monto:", monto_val,
+                  "nota:", nota)
             aid = self._comision_service.registrar_abono_por_nombre(
                 personal_nombre=personal,
                 fecha_consulta=fecha_dt or date.today(),
