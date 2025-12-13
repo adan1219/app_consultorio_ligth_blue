@@ -2941,7 +2941,16 @@ class ConsultorioGUI(tk.Tk):
             return
 
         try:
-            fecha_dt = _parse_date(str(fecha)).date() if hasattr(_parse_date, "__call__") else fecha
+            if hasattr(_parse_date, "__call__"):
+                parsed_fecha = _parse_date(str(fecha))
+                if isinstance(parsed_fecha, datetime):
+                    fecha_dt = parsed_fecha.date()
+                elif isinstance(parsed_fecha, date):
+                    fecha_dt = parsed_fecha
+                else:
+                    fecha_dt = parsed_fecha
+            else:
+                fecha_dt = date.fromisoformat(str(fecha))
         except Exception as e:
             print("[DEBUG] No pude parsear fecha del TreeView:", fecha, "->", e)
             fecha_dt = None
