@@ -2706,7 +2706,7 @@ class ConsultorioGUI(tk.Tk):
             command=self._cargar_pendientes_personal
         ).pack(side="left")
 
-        cols2 = ("fecha", "paciente", "total", "comision", "abonado", "restante", "metodo")
+        cols2 = ("fecha", "paciente", "total", "comision", "abonado", "restante", "moneda", "metodo")
         self.tree_com_pendientes = ttk.Treeview(frame_abonos, columns=cols2, show="headings", height=8)
 
         for c in cols2:
@@ -2791,7 +2791,7 @@ class ConsultorioGUI(tk.Tk):
         if not data:
             return
 
-        fecha, paciente, total, comi, abonado, restante, metodo = data
+        fecha, paciente, total, comi, abonado, restante, moneda, metodo = data
 
         win = tk.Toplevel(self)
         win.title("Confirmar Abono")
@@ -2802,6 +2802,7 @@ class ConsultorioGUI(tk.Tk):
                 font=("Arial", 10, "bold")).pack(pady=5)
 
         ttk.Label(win, text=f"Paciente: {paciente}").pack()
+        ttk.Label(win, text=f"Moneda: {moneda}").pack()
         ttk.Label(win, text=f"Comisión restante: ${restante}").pack(pady=5)
 
         ttk.Label(win, text="Monto a abonar:").pack(pady=3)
@@ -2921,6 +2922,7 @@ class ConsultorioGUI(tk.Tk):
                 f"{float(r.get('comision', 0.0)):.2f}",
                 f"{float(r.get('abonado', 0.0)):.2f}",
                 f"{float(r.get('restante', 0.0)):.2f}",
+                r.get("moneda", ""),
                 r.get("metodo", ""),
             )
             self.tree_com_pendientes.insert("", "end", values=vals)
