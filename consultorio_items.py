@@ -852,38 +852,9 @@ class CorteService:
         Hace merge con Consulta_Items para obtener subtotal y usa la lógica robusta
         de mapeo de doctores (por id_personal -> nombre, normalización y fallback).
         """
-        # preparar mapas normalizados
-        doctors_map_norm = {}
-        try:
-            for k, v in (self.cfg.doctors_percent or {}).items():
-                if k is None:
-                    continue
-                doctors_map_norm[normalize_name(k)] = float(v)
-        except Exception:
-            doctors_map_norm = {}
-
-        personal_df = self.repo.dfs.get("Personal", pd.DataFrame()).copy()
-        id_to_name_norm = {}
-        if not personal_df.empty:
-            for _, r in personal_df.iterrows():
-                pid = str(r.get("id_personal", "")).strip()
-                if pid:
-                    id_to_name_norm[pid] = normalize_name(r.get("nombre", ""))
-
-        def pct_for_row(row):
-            # 1) intentar por id_doctor si existe y mapea a nombre
-            id_doc = str(row.get("id_doctor", "") or "").strip()
-            if id_doc and id_doc in id_to_name_norm:
-                return doctors_map_norm.get(id_to_name_norm[id_doc], 0.0)
-            # 2) por nombre explícito
-            n = normalize_name(row.get("doc_nombre", ""))
-            if n and n in doctors_map_norm:
-                return doctors_map_norm[n]
-            # 3) fallback por coincidencia parcial
-            for k in doctors_map_norm.keys():
-                if (n and n.startswith(k)) or (k and k.startswith(n)) or (k in n) or (n in k):
-                    return doctors_map_norm[k]
-            return 0.0
+        com_serv = ComisionService(self.repo, self.cfg)
+        personal_df, pct_por_id = com_serv._build_maps_personal()
+        total_tecnico_map = com_serv._total_tecnico_por_consulta()
 
         # cargar detalle del corte y items
         det_all = self.repo.dfs.get("Corte_Detalle", pd.DataFrame()).copy()
@@ -898,7 +869,14 @@ class CorteService:
                 if c in df.columns:
                     df[c] = df[c].astype("string").fillna("")
 
+        cons = self.repo.dfs.get("Consultas", pd.DataFrame()).copy()
+        cons["id_consulta"] = cons.get("id_consulta", "").astype(str)
+        cons["total_consulta"] = pd.to_numeric(cons.get("total_consulta", 0.0), errors="coerce").fillna(0.0)
+        cons["id_doctor"] = cons.get("id_doctor", "").astype(str)
+        cons["id_promotor"] = cons.get("id_promotor", "").astype(str)
+
         merged = rows.merge(items, on="id_item", how="left", suffixes=("_det", "_item"))
+        merged = merged.merge(cons[["id_consulta","total_consulta","id_doctor","id_promotor"]], on="id_consulta", how="left")
 
         # subtotal robusto
         merged["subtotal"] = pd.to_numeric(merged.get("subtotal", merged.get("subtotal_item", merged.get("subtotal_det", 0))), errors="coerce").fillna(0.0)
@@ -914,7 +892,7 @@ class CorteService:
             merged["subtotal"] = 0.0
 
         # 2) asegurar columnas textuales que usaremos (evita AttributeError sobre .fillna())
-        _text_cols = ["doc_nombre", "doctor", "id_doctor", "promotor", "pro_nombre", "tec_nombre"]
+        _text_cols = ["doc_nombre", "doctor", "id_doctor", "promotor", "pro_nombre", "tec_nombre", "id_promotor", "id_tecnico_item"]
         for col in _text_cols:
             if col in merged.columns:
                 try:
@@ -929,15 +907,32 @@ class CorteService:
         if merged["doc_nombre"].eq("").all() and "doctor" in merged.columns:
             merged["doc_nombre"] = merged["doctor"]
 
+        merged["total_tecnico"] = merged["id_consulta"].map(total_tecnico_map).fillna(0.0)
+        merged["base_consulta"] = (merged["total_consulta"] - merged["total_tecnico"]).clip(lower=0.0)
+        merged["base_item"] = merged.apply(lambda r: float(r.get("subtotal", 0.0)) if str(r.get("id_tecnico_item", "")).strip() == "" else 0.0, axis=1)
 
-        # calcular %
-        merged["pct_doc"] = merged.apply(pct_for_row, axis=1)
-        merged["comision_doctor_new"] = (merged["subtotal"].fillna(0.0) * merged["pct_doc"].fillna(0.0)).round(2)
-        merged["comision_promotor_new"] = merged.apply(
-            lambda r: round(float(r.get("subtotal", 0.0)) * float(self.cfg.promoter_percent or 0.0), 2)
-            if str(r.get("promotor", "") or r.get("pro_nombre", "")).strip() else 0.0,
-            axis=1
-        )
+        base_por_consulta = merged.groupby("id_consulta")["base_item"].sum().replace(0, np.nan)
+
+        def _pct_doc(r):
+            return com_serv._pct_personal(r.get("id_doctor", ""), pct_por_id)
+
+        def _pct_pro(r):
+            return com_serv._pct_personal(r.get("id_promotor", ""), pct_por_id)
+
+        merged["pct_doc"] = merged.apply(_pct_doc, axis=1)
+        merged["pct_pro"] = merged.apply(_pct_pro, axis=1)
+
+        def _comision_row(r, pct_col):
+            base_total = float(r.get("base_consulta", 0.0))
+            pct_val = float(r.get(pct_col, 0.0))
+            base_item = float(r.get("base_item", 0.0))
+            denom = float(base_por_consulta.get(r.get("id_consulta"), np.nan))
+            if np.isnan(denom) or denom <= 0 or pct_val <= 0:
+                return 0.0
+            return round(base_total * pct_val * (base_item / denom), 2)
+
+        merged["comision_doctor_new"] = merged.apply(lambda r: _comision_row(r, "pct_doc"), axis=1)
+        merged["comision_promotor_new"] = merged.apply(lambda r: _comision_row(r, "pct_pro"), axis=1)
 
         # aplicar valores en Corte_Detalle
         for _, r in merged.iterrows():
@@ -952,7 +947,7 @@ class CorteService:
             self.repo.dfs["Corte_Detalle"].at[i, "comision_promotor"] = float(r.get("comision_promotor_new", 0.0) or 0.0)
 
         # recalcular totales y guardar
-        tot_ing = float(merged["subtotal"].sum())
+        tot_ing = float(merged.groupby("id_consulta")["total_consulta"].max().sum()) if "total_consulta" in merged.columns else float(merged["subtotal"].sum())
         tot_cd = float(merged["comision_doctor_new"].sum())
         tot_cp = float(merged["comision_promotor_new"].sum())
         tot_ct = 0.0
@@ -984,32 +979,44 @@ class CorteService:
             # nada que cortar
             return "", pd.DataFrame(), {"total_ingresos": 0.0, "total_costo_tecnico": 0.0, "total_comisiones_doctores": 0.0, "total_comisiones_promotores": 0.0, "total_utilidad": 0.0}
 
-        # Normalizar nombres de doctores para mapear comisiones (desde config)
-        doctors_map_norm = {}
-        try:
-            for k, v in (self.cfg.doctors_percent or {}).items():
-                if k is None:
-                    continue
-                doctors_map_norm[normalize_name(k)] = float(v)
-        except Exception:
-            doctors_map_norm = {}
+        com_serv = ComisionService(self.repo, self.cfg)
+        personal_df, pct_por_id = com_serv._build_maps_personal()
+        total_tecnico_map = com_serv._total_tecnico_por_consulta()
 
-        def doctor_pct_norm(name):
-            n = normalize_name(name)
-            return float(doctors_map_norm.get(n, 0.0))
-
-        # Calcula comisiones por item (aplicando mapping normalizado)
         df_items = df_items.copy()
-        df_items["pct_doc"] = df_items["doc_nombre"].fillna("").apply(lambda n: doctor_pct_norm(n))
+        df_items["id_consulta"] = df_items.get("id_consulta", "").astype(str)
+        df_items["id_doctor"] = df_items.get("id_doctor", "").astype(str)
+        df_items["id_promotor"] = df_items.get("id_promotor", "").astype(str)
+        df_items["subtotal"] = pd.to_numeric(df_items.get("subtotal", 0.0), errors="coerce").fillna(0.0)
+        df_items["id_tecnico_item"] = df_items.get("id_tecnico_item", "").astype(str)
 
-        df_items["comision_doctor"] = (df_items["subtotal"].fillna(0.0) * df_items["pct_doc"]).round(2)
-        df_items["comision_promotor"] = df_items.apply(
-            lambda r: round(float(r["subtotal"] or 0) * float(self.cfg.promoter_percent or 0.0), 2)
-            if pd.notna(r.get("pro_nombre")) and str(r.get("pro_nombre")).strip() != "" else 0.0, axis=1
-        )
+        cons = self.repo.dfs.get("Consultas", pd.DataFrame()).copy()
+        cons["id_consulta"] = cons.get("id_consulta", "").astype(str)
+        cons["total_consulta"] = pd.to_numeric(cons.get("total_consulta", 0.0), errors="coerce").fillna(0.0)
 
-        # Totales calculados sobre los items (por ahora costo_tecnico por item no está en schema -> 0)
-        tot_ing = float(df_items["subtotal"].sum())
+        df_items = df_items.merge(cons[["id_consulta", "total_consulta"]], on="id_consulta", how="left")
+        df_items["total_tecnico"] = df_items["id_consulta"].map(total_tecnico_map).fillna(0.0)
+        df_items["base_consulta"] = (df_items["total_consulta"] - df_items["total_tecnico"]).clip(lower=0.0)
+        df_items["base_item"] = df_items.apply(lambda r: float(r.get("subtotal", 0.0)) if str(r.get("id_tecnico_item", "")).strip() == "" else 0.0, axis=1)
+
+        base_por_consulta = df_items.groupby("id_consulta")["base_item"].sum().replace(0, np.nan)
+
+        df_items["pct_doc"] = df_items.apply(lambda r: com_serv._pct_personal(r.get("id_doctor", ""), pct_por_id), axis=1)
+        df_items["pct_pro"] = df_items.apply(lambda r: com_serv._pct_personal(r.get("id_promotor", ""), pct_por_id), axis=1)
+
+        def _comision_row(r, pct_col):
+            base_total = float(r.get("base_consulta", 0.0))
+            pct_val = float(r.get(pct_col, 0.0))
+            base_item = float(r.get("base_item", 0.0))
+            denom = float(base_por_consulta.get(r.get("id_consulta"), np.nan))
+            if np.isnan(denom) or denom <= 0 or pct_val <= 0:
+                return 0.0
+            return round(base_total * pct_val * (base_item / denom), 2)
+
+        df_items["comision_doctor"] = df_items.apply(lambda r: _comision_row(r, "pct_doc"), axis=1)
+        df_items["comision_promotor"] = df_items.apply(lambda r: _comision_row(r, "pct_pro"), axis=1)
+
+        tot_ing = float(df_items.groupby("id_consulta")["total_consulta"].max().sum()) if "total_consulta" in df_items.columns else float(df_items["subtotal"].sum())
         tot_cd = float(df_items["comision_doctor"].sum())
         tot_cp = float(df_items["comision_promotor"].sum())
         tot_ct = 0.0
@@ -1057,7 +1064,7 @@ class CorteService:
                 return id_corte, pd.DataFrame(), resumen
 
             # calculos sólo sobre los items nuevos
-            add_ing = float(df_items_nuevos["subtotal"].sum())
+            add_ing = float(df_items_nuevos.groupby("id_consulta")["total_consulta"].max().sum()) if "total_consulta" in df_items_nuevos.columns else float(df_items_nuevos["subtotal"].sum())
             add_cd = float(df_items_nuevos["comision_doctor"].sum())
             add_cp = float(df_items_nuevos["comision_promotor"].sum())
             add_ct = 0.0
@@ -1325,36 +1332,30 @@ class ComisionService:
                 pct = 0.0
             pct_por_id[pid] = pct
 
-        # mapa de doctores desde config.json
-        cfg_doctors = {}
-        try:
-            for k, v in (self.cfg.doctors_percent or {}).items():
-                if k is None:
-                    continue
-                cfg_doctors[normalize_name(k)] = float(v)
-        except Exception:
-            cfg_doctors = {}
+        return personal, pct_por_id
 
-        return personal, pct_por_id, cfg_doctors
-
-    def _pct_doctor(self, id_doctor: str, nombre_doctor: str, pct_por_id: dict, cfg_doctors: dict) -> float:
-        """
-        Regla de negocio para % de doctor:
-        1) Si en Personal.pct_comision hay valor > 0 -> usarlo.
-        2) Si no, buscar en config.doctors_percent por nombre normalizado.
-        3) Si nada, 0.0
-        """
-        pid = str(id_doctor or "").strip()
+    def _pct_personal(self, id_personal: str, pct_por_id: dict) -> float:
+        """Regresa el pct_comision directo de Personal (sin fallback)."""
+        pid = str(id_personal or "").strip()
         if pid and pid in pct_por_id and pct_por_id[pid] > 0:
             return float(pct_por_id[pid])
-        n = normalize_name(nombre_doctor or "")
-        if n in cfg_doctors:
-            return float(cfg_doctors[n])
-        # fallback por coincidencia parcial
-        for k in cfg_doctors.keys():
-            if n and (n.startswith(k) or k.startswith(n) or k in n or n in k):
-                return float(cfg_doctors[k])
         return 0.0
+
+    def _total_tecnico_por_consulta(self) -> pd.Series:
+        """
+        Calcula la suma de items marcados con id_tecnico_item por consulta.
+        Si no hay items o columna, devuelve Serie vacía.
+        """
+        items = self.repo.dfs.get("Consulta_Items", pd.DataFrame()).copy()
+        if items.empty or "id_consulta" not in items.columns:
+            return pd.Series(dtype=float)
+        items["id_consulta"] = items.get("id_consulta", "").astype(str)
+        items["subtotal"] = pd.to_numeric(items.get("subtotal", 0.0), errors="coerce").fillna(0.0)
+        items["id_tecnico_item"] = items.get("id_tecnico_item", "").astype(str)
+        items_tecnico = items[items["id_tecnico_item"].str.strip() != ""].copy()
+        if items_tecnico.empty:
+            return pd.Series(dtype=float)
+        return items_tecnico.groupby("id_consulta")["subtotal"].sum()
 
     # ---------------------------------------------------
     # 1) Resumen de comisiones de un doctor en un día
@@ -1375,7 +1376,7 @@ class ComisionService:
             cols = ["hora","paciente","total","metodo","moneda","comision","pagado","pendiente"]
             return pd.DataFrame(columns=cols), {"total_generado":0.0, "pagado":0.0, "pendiente":0.0}
 
-        personal, pct_por_id, cfg_doctors = self._build_maps_personal()
+        personal, pct_por_id = self._build_maps_personal()
         doctores = personal[personal["rol"].str.lower() == "doctor"].copy()
         doctores["nombre_norm"] = doctores.get("nombre","").fillna("").apply(normalize_name)
         target_norm = normalize_name(nombre_doctor)
@@ -1415,17 +1416,22 @@ class ComisionService:
         )
         cons_dia["nombre_doctor"] = cons_dia["nombre_doctor"].fillna(nombre_doctor)
 
-        # % comisión por fila
-        cons_dia["pct_comision"] = cons_dia.apply(
-            lambda r: self._pct_doctor(
-                r.get("id_doctor",""),
-                r.get("nombre_doctor",""),
-                pct_por_id,
-                cfg_doctors
-            ),
-            axis=1
-        )
-        cons_dia["comision"] = (cons_dia["total_consulta"] * cons_dia["pct_comision"]).round(2)
+        # total técnico por consulta
+        total_tecnico_map = self._total_tecnico_por_consulta()
+        cons_dia["id_consulta"] = cons_dia.get("id_consulta", "").astype(str)
+        cons_dia["total_tecnico"] = cons_dia["id_consulta"].map(total_tecnico_map).fillna(0.0)
+
+        # % comisión por fila y señalización de faltantes
+        faltantes = set()
+        def pct_row(r):
+            pct = self._pct_personal(r.get("id_doctor",""), pct_por_id)
+            if pct <= 0:
+                faltantes.add(str(r.get("nombre_doctor", nombre_doctor) or "").strip())
+            return pct
+
+        cons_dia["pct_comision"] = cons_dia.apply(pct_row, axis=1)
+        cons_dia["base_comision"] = (cons_dia["total_consulta"] - cons_dia["total_tecnico"]).clip(lower=0.0)
+        cons_dia["comision"] = (cons_dia["base_comision"] * cons_dia["pct_comision"]).round(2)
 
         # Abonos acumulados para (doctor, consulta)
         ab = self.repo.dfs.get("Comisiones_Abonos", pd.DataFrame()).copy()
@@ -1459,7 +1465,7 @@ class ComisionService:
             "pagado": round(pagado,2),
             "pendiente": round(pendiente,2)
         }
-        return out, totales
+        return out, totales, sorted({n for n in faltantes if n})
 
     # ---------------------------------------------------
     # 2) Pendientes por personal (doctor/promotor)
@@ -1496,27 +1502,29 @@ class ComisionService:
         cons["moneda"] = cons.get("moneda","").fillna("")
 
         # maps para % doctor
-        personal, pct_por_id, cfg_doctors = self._build_maps_personal()
+        personal, pct_por_id = self._build_maps_personal()
 
+        total_tecnico_map = self._total_tecnico_por_consulta()
+        cons["id_consulta"] = cons.get("id_consulta", "").astype(str)
+        cons["total_tecnico"] = cons["id_consulta"].map(total_tecnico_map).fillna(0.0)
+
+        faltantes = set()
         def pct_row(r):
-            if str(r.get("id_doctor","")) == idp:
-                # es doctor
-                nombre_doc = ""
-                if not personal.empty:
-                    m = personal[personal["id_personal"].astype(str) == idp]
-                    if not m.empty:
-                        nombre_doc = m.iloc[0].get("nombre","")
-                return self._pct_doctor(idp, nombre_doc, pct_por_id, cfg_doctors)
-            if str(r.get("id_promotor","")) == idp:
-                # es promotor
-                try:
-                    return float(self.cfg.promoter_percent or 0.0)
-                except Exception:
-                    return 0.0
+            if str(r.get("id_doctor","")) == idp or str(r.get("id_promotor","")) == idp:
+                pct = self._pct_personal(idp, pct_por_id)
+                if pct <= 0:
+                    nombre_row = ""
+                    if not personal.empty:
+                        m = personal[personal["id_personal"].astype(str) == idp]
+                        if not m.empty:
+                            nombre_row = m.iloc[0].get("nombre", "")
+                    faltantes.add(str(nombre_row or nombre).strip())
+                return pct
             return 0.0
 
         cons["pct_comision"] = cons.apply(pct_row, axis=1)
-        cons["comision"] = (cons["total_consulta"] * cons["pct_comision"]).round(2)
+        cons["base_comision"] = (cons["total_consulta"] - cons["total_tecnico"]).clip(lower=0.0)
+        cons["comision"] = (cons["base_comision"] * cons["pct_comision"]).round(2)
 
         # Abonos acumulados
         ab = self.repo.dfs.get("Comisiones_Abonos", pd.DataFrame()).copy()
@@ -1544,7 +1552,7 @@ class ComisionService:
 
         out = cons[cols].rename(columns={"total_consulta":"total"})
         out = out.sort_values("fecha")
-        return out
+        return out, sorted({n for n in faltantes if n})
 
     # ---------------------------------------------------
     # 3) Registrar abono (por IDs)
@@ -1806,69 +1814,32 @@ class KPIService:
         # Comisiones doctor / promotor
         # ==============================
 
-        def _normalize_name_local(s):
-            if not s:
-                return ""
-            s = str(s).strip().lower()
-            import unicodedata
-            s = "".join(ch for ch in unicodedata.normalize("NFKD", s)
-                        if not unicodedata.combining(ch))
-            return " ".join(s.split())
+        com_serv = ComisionService(self.repo, self.cfg)
+        _, pct_por_id = com_serv._build_maps_personal()
+        total_tecnico_map = com_serv._total_tecnico_por_consulta()
 
-        doctors_map_norm = {
-            _normalize_name_local(k): float(v)
-            for k, v in (self.cfg.doctors_percent or {}).items()
-            if k is not None
-        }
+        cons_df = self.repo.dfs.get("Consultas", pd.DataFrame()).copy()
+        cons_df["fecha"] = pd.to_datetime(cons_df.get("fecha"), errors="coerce")
+        cons_df = cons_df[(cons_df["fecha"] >= pd.Timestamp(desde)) & (cons_df["fecha"] <= pd.Timestamp(hasta))]
+        cons_df["id_consulta"] = cons_df.get("id_consulta", "").astype(str)
+        cons_df["id_doctor"] = cons_df.get("id_doctor", "").astype(str)
+        cons_df["id_promotor"] = cons_df.get("id_promotor", "").astype(str)
+        cons_df["total_consulta"] = pd.to_numeric(cons_df.get("total_consulta", 0.0), errors="coerce").fillna(0.0)
+        cons_df["total_tecnico"] = cons_df["id_consulta"].map(total_tecnico_map).fillna(0.0)
+        cons_df["base_consulta"] = (cons_df["total_consulta"] - cons_df["total_tecnico"]).clip(lower=0.0)
 
-        personal_df = self.repo.dfs.get("Personal", pd.DataFrame()).copy()
-        id_to_name_norm = {}
-        if not personal_df.empty:
-            for _, r in personal_df.iterrows():
-                pid = str(r.get("id_personal", "")).strip()
-                if pid:
-                    id_to_name_norm[pid] = _normalize_name_local(r.get("nombre", ""))
+        cons_df["pct_doc"] = cons_df.apply(lambda r: com_serv._pct_personal(r.get("id_doctor", ""), pct_por_id), axis=1)
+        cons_df["pct_pro"] = cons_df.apply(lambda r: com_serv._pct_personal(r.get("id_promotor", ""), pct_por_id), axis=1)
 
-        def pct_for_row(row):
-            # 1) por id_doctor
-            id_doc = str(row.get("id_doctor", "") or "").strip()
-            if id_doc and id_doc in id_to_name_norm:
-                return doctors_map_norm.get(id_to_name_norm[id_doc], 0.0)
-
-            # 2) por nombre
-            name = _normalize_name_local(row.get("doc_nombre", "") or "")
-            if name in doctors_map_norm:
-                return doctors_map_norm[name]
-
-            # 3) coincidencia parcial
-            for k in doctors_map_norm:
-                if name and (name.startswith(k) or k.startswith(name) or k in name or name in k):
-                    return doctors_map_norm[k]
-            return 0.0
-
-        df["pct_doc"] = df.apply(pct_for_row, axis=1)
-        df["comision_doctor"] = (df["subtotal"] * df["pct_doc"]).round(2)
-
-        if "pro_nombre" not in df.columns:
-            df["pro_nombre"] = ""
-        df["pro_nombre"] = df["pro_nombre"].fillna("").astype(str)
-
-        promoter_pct = float(self.cfg.promoter_percent or 0.0)
-
-        def _promo_calc(row):
-            prom = row.get("pro_nombre", "")
-            if str(prom).strip() != "":
-                return round(float(row["subtotal"]) * promoter_pct, 2)
-            return 0.0
-
-        df["comision_promotor"] = df.apply(_promo_calc, axis=1)
+        cons_df["comision_doctor"] = (cons_df["base_consulta"] * cons_df["pct_doc"]).round(2)
+        cons_df["comision_promotor"] = (cons_df["base_consulta"] * cons_df["pct_pro"]).round(2)
 
         if "costo_tecnico" not in df.columns:
             df["costo_tecnico"] = 0.0
-        df["costo_tecnico"] = pd.to_numeric(df["costo_tecnico"], errors="coerce").fillna(0.0)
+        df["costo_tecnico"] = pd.to_numeric(df.get("costo_tecnico", 0.0), errors="coerce").fillna(0.0)
 
-        tot_cd = float(df["comision_doctor"].sum())
-        tot_cp = float(df["comision_promotor"].sum())
+        tot_cd = float(cons_df["comision_doctor"].sum())
+        tot_cp = float(cons_df["comision_promotor"].sum())
         tot_ct = float(df["costo_tecnico"].sum())
 
         utilidad = round(ingresos - tot_cd - tot_cp - tot_ct, 2)

@@ -2860,7 +2860,12 @@ class ConsultorioGUI(tk.Tk):
         self.tree_com_resumen.delete(*self.tree_com_resumen.get_children())
 
         try:
-            df, tot = self._comision_service.resumen_dia_por_doctor(fecha_sel, doctor)
+            result = self._comision_service.resumen_dia_por_doctor(fecha_sel, doctor)
+            if isinstance(result, tuple) and len(result) == 3:
+                df, tot, faltantes = result
+            else:
+                df, tot = result
+                faltantes = []
         except Exception as e:
             messagebox.showerror("Comisiones", f"Error cargando comisiones:\n{e}")
             return
@@ -2881,6 +2886,12 @@ class ConsultorioGUI(tk.Tk):
         self.lbl_com_gen.config(text=f"{float(tot.get('total_generado', 0.0)):.2f}")
         self.lbl_com_pag.config(text=f"{float(tot.get('pagado', 0.0)):.2f}")
         self.lbl_com_pen.config(text=f"{float(tot.get('pendiente', 0.0)):.2f}")
+        if faltantes:
+            nombres = ", ".join([n for n in faltantes if str(n).strip()])
+            messagebox.showwarning(
+                "Comisiones",
+                f"Hay personal sin porcentaje de comisión definido: {nombres}. Configura su pct_comision en el catálogo de personal."
+            )
         self._cargar_historial_abonos()
 
 
@@ -2909,7 +2920,12 @@ class ConsultorioGUI(tk.Tk):
         self.tree_com_pendientes.delete(*self.tree_com_pendientes.get_children())
 
         try:
-            df = self._comision_service.pendientes_por_personal(id_personal)
+            result = self._comision_service.pendientes_por_personal(id_personal)
+            if isinstance(result, tuple) and len(result) == 2:
+                df, faltantes = result
+            else:
+                df = result
+                faltantes = []
         except Exception as e:
             messagebox.showerror("Comisiones", f"Error cargando pendientes:\n{e}")
             return
@@ -2926,6 +2942,12 @@ class ConsultorioGUI(tk.Tk):
                 r.get("metodo", ""),
             )
             self.tree_com_pendientes.insert("", "end", values=vals)
+        if faltantes:
+            nombres = ", ".join([n for n in faltantes if str(n).strip()])
+            messagebox.showwarning(
+                "Comisiones",
+                f"Hay personal sin porcentaje de comisión definido: {nombres}. Configura su pct_comision en el catálogo de personal."
+            )
         self._cargar_historial_abonos()
 
 
