@@ -1,0 +1,7 @@
+python-dateutil
+pandas
+numpy
+openpyxl
+tkcalendar
+matplotlib
+reportlab
